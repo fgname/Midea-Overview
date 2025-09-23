@@ -3,27 +3,20 @@ r"""
 MIDEA - Overview Operação Midea (Diário) — Streamlit
 
 Ajustes:
-- Selectbox com alto contraste (fundo escuro, texto/ícone brancos, borda ciano)
-- Botão "Atualizar dados" com estilo (azul + texto branco)
-- Título da página: "MIDEA - Overview (Tecadi)"
-- Favicon (ícone) do caminho informado
-- Rodapé fixo com © Tecadi — versão v1.0...
-- Link fixo do OneDrive (opcional), gráfico, filtros, tema etc.
+- Carregar sempre a versão mais recente ao abrir (sem clicar em Atualizar)
+- Cache-buster (nocache=) para furar cache do SharePoint/CDN/Streamlit
+- Botão Atualizar continua funcionando
+- width="stretch" no lugar de use_container_width
+- Forçar FREETIME (ou variantes) para texto, evitando ArrowTypeError
+- Converter colunas com qualquer texto/objeto para pandas StringDtype (ex.: QTD com '???')
+- Horário em America/Sao_Paulo (Brasília)
 """
 
 from __future__ import annotations
-import os, re, io, tempfile, base64, datetime
+import os, re, io, time, tempfile, base64, datetime
 import requests
 import pandas as pd
 import streamlit as st
-
-# Fuso horário Brasil
-from datetime import timezone, timedelta
-try:
-    from zoneinfo import ZoneInfo
-    BRT_TZ = ZoneInfo("America/Sao_Paulo")
-except Exception:
-    BRT_TZ = timezone(timedelta(hours=-3))
 
 # Tenta Plotly; se não, cai para Altair
 HAS_PLOTLY = True
@@ -33,7 +26,11 @@ except Exception:
     HAS_PLOTLY = False
 
 # ================== CONFIG ==================
-DEFAULT_ONEDRIVE_URL = r"https://tecadi-my.sharepoint.com/:x:/g/personal/rafael_alves_tecadi_com_br/EaJshSFavb5Pv8z_dpW3ZWwBVhjuG3tFcYeSRUMWSEbYyg"
+# >>> LINK PERMANENTE DO ONEDRIVE (com ?download=1) <<<
+DEFAULT_ONEDRIVE_URL = (
+    "https://tecadi-my.sharepoint.com/:x:/g/personal/rafael_alves_tecadi_com_br/"
+    "EaJshSFavb5Pv8z_dpW3ZWwBVhjuG3tFcYeSRUMWSEbYyg?download=1"
+)
 DEFAULT_ONEDRIVE_URL = os.environ.get("MIDEA_ONEDRIVE_URL", DEFAULT_ONEDRIVE_URL)
 
 TARGET_SHEET_1 = "PROGRAMAÇÃO DIÁRIA"
@@ -85,6 +82,7 @@ def is_filled(val) -> bool:
     return s != "" and s.lower() != "none"
 
 def clean_onedrive_url(url: str) -> str:
+    # mantem ?download=1 se já estiver
     if not url:
         return url
     if "download=1" not in url:
@@ -110,7 +108,15 @@ def _safe_ext_from_name(name: str) -> str:
 
 @st.cache_data(show_spinner="Baixando arquivo do OneDrive…")
 def _fetch_excel_bytes(url: str, refresh_key: int) -> bytes:
+    """
+    Busca o Excel do OneDrive, furando caches:
+      - mantém ?download=1
+      - adiciona 'nocache=<refresh_key>_<timestamp>' para impedir cache do SharePoint/CDN
+    """
     final_url = clean_onedrive_url(url)
+    sep = "&" if "?" in final_url else "?"
+    final_url = f"{final_url}{sep}nocache={refresh_key}_{int(time.time())}"
+
     with requests.get(final_url, stream=True, timeout=60, allow_redirects=True) as r:
         r.raise_for_status()
         return r.content
@@ -193,31 +199,6 @@ def count_area_status_filtered(path: str, sheet_name: str, area_key: str, requir
     em_aberto = total - finalizados
     return total, finalizados, em_aberto, df
 
-# --------- NEW: tornar DataFrames seguros para o Arrow/Streamlit ----------
-def _make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
-    """Converte colunas com tipos mistos para string e força FREETIME como texto."""
-    if df is None or df.empty:
-        return df
-    df = df.copy()
-
-    # força FREETIME para string (variações comuns de nome)
-    target_names = {"FREETIME", "FREE TIME", "FREE-TIME"}
-    upper_cols = {str(c).strip().upper(): c for c in df.columns}
-    for up, real in upper_cols.items():
-        if up in target_names:
-            df[real] = df[real].apply(lambda x: "" if pd.isna(x) else str(x))
-    # qualquer outra coluna com tipos mistos (exclui numérica e datetime)
-    for c in df.columns:
-        s = df[c]
-        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
-            continue
-        # se tem mais de um tipo (ignora NaN), converte para string
-        types = {type(x) for x in s.dropna().values}
-        if len(types) > 1:
-            df[c] = s.apply(lambda x: "" if pd.isna(x) else str(x))
-    return df
-# --------------------------------------------------------------------------
-
 # ================== THEME & CSS ==================
 def _mime_from_path(p: str) -> str:
     ext = os.path.splitext(p)[1].lower()
@@ -261,6 +242,7 @@ def _inject_theme_and_background():
 
     st.markdown(f"""
     <style>
+    /* esconder toolbar/Deploy, header e footer */
     div[data-testid="stToolbar"], div[data-testid="stStatusWidget"], div[data-testid="stDecoration"] {{ display: none !important; }}
     #MainMenu {{ visibility: hidden; }}
     header {{ visibility: hidden; height: 0; }}
@@ -269,9 +251,11 @@ def _inject_theme_and_background():
     {bg_css}
     {logo_css}
 
+    /* texto branco global (exceto DataFrames) */
     .block-container, .block-container *:not([data-testid="stDataFrame"] *),
     h1, h2, h3, h4, h5, h6, p, label, span {{ color: #fff !important; }}
 
+    /* DataFrames com texto escuro para legibilidade */
     div[data-testid="stDataFrame"] * {{ color: #111 !important; }}
 
     .block-container {{ padding-top: 0.6rem !important; }}
@@ -290,8 +274,11 @@ def _inject_theme_and_background():
         color:#e9faff; font-weight:700; letter-spacing:.2px; margin-bottom: 6px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,.25);
     }}
-    div[data-testid="stMetricValue"] {{ font-size: 48px !important; line-height: 1.0 !important; margin-top: 2px !important; }}
+    div[data-testid="stMetricValue"] {{
+        font-size: 48px !important; line-height: 1.0 !important; margin-top: 2px !important;
+    }}
 
+    /* ---- Botões padrão (st.button) ---- */
     .stButton button {{
       background: rgba(0, 120, 255, 0.90) !important;
       color: #ffffff !important;
@@ -300,9 +287,16 @@ def _inject_theme_and_background():
       padding: 8px 14px !important;
       box-shadow: 0 3px 12px rgba(0,0,0,0.25) !important;
     }}
-    .stButton button:hover {{ filter: brightness(1.06); transform: translateY(-1px); }}
+    .stButton button:hover {{
+      filter: brightness(1.06);
+      transform: translateY(-1px);
+    }}
 
-    .stSelectbox label {{ color:#fff !important; font-weight:700; }}
+    /* ---- Selectbox ALTO CONTRASTE ---- */
+    .stSelectbox label {{
+      color:#fff !important;
+      font-weight:700;
+    }}
     .stSelectbox [data-baseweb="select"] > div {{
       background:#0F2846 !important;
       border:2px solid #00BFFF !important;
@@ -312,12 +306,18 @@ def _inject_theme_and_background():
     }}
     .stSelectbox [data-baseweb="select"] * {{ color:#fff !important; }}
     .stSelectbox [data-baseweb="select"] svg {{ fill:#fff !important; }}
-    ul[role="listbox"] {{ background:#0F2846 !important; color:#fff !important; border:1px solid #00BFFF !important; }}
+    ul[role="listbox"] {{
+      background:#0F2846 !important;
+      color:#fff !important;
+      border:1px solid #00BFFF !important;
+    }}
     ul[role="listbox"] li {{ color:#fff !important; }}
     ul[role="listbox"] li:hover {{ background:rgba(0,191,255,.15) !important; }}
+    .stSelectbox [data-baseweb="select"] > div > div {{
+      font-size:1.05rem; font-weight:700;
+    }}
 
-    .stSelectbox [data-baseweb="select"] > div > div {{ font-size:1.05rem; font-weight:700; }}
-
+    /* botões de download */
     div[data-testid="stDownloadButton"] button,
     div[data-testid="stDownloadButton"] > div > button {{
         background: rgba(0, 120, 255, 0.9) !important; color: #fff !important;
@@ -338,11 +338,8 @@ def card_metric(title: str, value: int | float | str, legend: str = ""):
         st.markdown("</div>", unsafe_allow_html=True)
 
 def build_overview_chart(labels, finalizados, em_aberto, totais):
-    """Gráfico com folga no topo para não cortar os números e texto sem clip."""
     cor_andamento = "#425F96"   # Em andamento
     cor_finalizado = "#177833"  # Finalizado
-    headroom = 1.25 * (max(totais) if len(totais) else 0)
-
     if HAS_PLOTLY:
         fig = go.Figure()
         fig.add_trace(go.Bar(x=labels, y=em_aberto,   name="Em andamento",
@@ -357,18 +354,17 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
                                  textfont=dict(size=18, color="#FFFFFF"),
                                  hoverinfo="skip", showlegend=False))
         fig.update_layout(
-            barmode="stack", height=360,
-            margin=dict(l=10, r=10, t=40, b=10),
+            barmode="stack",
+            height=420,                          # um pouco mais alto para não cortar o label
+            margin=dict(l=10, r=10, t=30, b=10), # top maior
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#FFFFFF"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1)
         )
-        fig.update_yaxes(range=[0, headroom], automargin=True,
-                         gridcolor="rgba(255,255,255,0.15)",
-                         tickfont=dict(color="#FFFFFF"), color="#FFFFFF")
-        fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)",
-                         tickfont=dict(color="#FFFFFF"), color="#FFFFFF")
-        fig.update_traces(cliponaxis=False, selector=dict(type='scatter'))
+        fig.update_xaxes(tickfont=dict(color="#FFFFFF"), color="#FFFFFF",
+                         gridcolor="rgba(255,255,255,0.15)")
+        fig.update_yaxes(tickfont=dict(color="#FFFFFF"), color="#FFFFFF",
+                         gridcolor="rgba(255,255,255,0.15)")
         return fig, "plotly"
     else:
         import altair as alt
@@ -382,45 +378,61 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
             alt.Chart(df_long).mark_bar()
             .encode(
                 x=alt.X("Operacao:N", axis=alt.Axis(labelColor="white", title=None)),
-                y=alt.Y("Valor:Q", stack="zero",
-                        axis=alt.Axis(labelColor="white", title=None),
-                        scale=alt.Scale(domain=[0, headroom])),
+                y=alt.Y("Valor:Q", stack="zero", axis=alt.Axis(labelColor="white", title=None)),
                 color=alt.Color("Status:N",
                                 scale=alt.Scale(domain=["Em andamento", "Finalizado"],
                                                 range=["#425F96", "#177833"]),
                                 legend=alt.Legend(labelColor="white", titleColor="white"))
             )
-            .properties(height=320).configure_view(stroke=None)
+            .properties(height=380).configure_view(stroke=None)
         )
         txt = alt.Chart(df).mark_text(color="white", dy=-6, fontSize=18)\
-            .encode(x=alt.X("Operacao:N"),
-                    y=alt.Y("Total:Q", scale=alt.Scale(domain=[0, headroom])),
-                    text="Total:Q")
+            .encode(x=alt.X("Operacao:N"), y=alt.Y("Total:Q"), text="Total:Q")
         return (chart + txt).configure_axis(grid=False, labelColor="white", titleColor="white"), "altair"
 
 # ================== APP ==================
+# Define favicon + título
 page_icon_path = next((p for p in FAVICON_CANDIDATES if os.path.exists(p)), None)
-st.set_page_config(page_title="MIDEA - Overview (Tecadi)", page_icon=page_icon_path, layout="wide")
+st.set_page_config(
+    page_title="MIDEA - Overview (Tecadi)",
+    page_icon=page_icon_path,
+    layout="wide"
+)
+
 _inject_theme_and_background()
 
+# --- Estado de sessão ---
 if "refresh_counter" not in st.session_state:
-    st.session_state.refresh_counter = 0
+    # força a PRIMEIRA carga da sessão a ser única (pega sempre a versão mais recente)
+    st.session_state.refresh_counter = int(time.time())
 if "last_updated" not in st.session_state:
     st.session_state.last_updated = None
 if "fixed_url" not in st.session_state:
     st.session_state.fixed_url = DEFAULT_ONEDRIVE_URL.strip()
 
 st.title("MIDEA — Overview Operação (Diário)")
+
+# Botão de atualizar + relógio em Brasília
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+    tz_br = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    tz_br = None
+
 top_l, top_r = st.columns([0.80, 0.20])
 with top_r:
     if st.button("🔄 Atualizar dados", type="primary", help="Recarrega o Excel do OneDrive"):
         st.session_state.refresh_counter += 1
         st.rerun()
     if st.session_state.last_updated:
-        st.caption(f"Atualizado: {st.session_state.last_updated:%d/%m %H:%M:%S} (Brasília)")
+        if tz_br:
+            st.caption(f"Atualizado: {st.session_state.last_updated.astimezone(tz_br):%d/%m %H:%M:%S} (Brasília)")
+        else:
+            st.caption(f"Atualizado: {st.session_state.last_updated:%d/%m %H:%M:%S}")
 
 st.caption("Versão v1.0 — Overview & Exportações")
 
+# Link fixo ou entrada manual (fallback)
 if not st.session_state.fixed_url:
     st.subheader("Informe o link do OneDrive para iniciar")
     link = st.text_input("Link do OneDrive (compartilhado)", placeholder="cole aqui o link do arquivo…")
@@ -438,7 +450,8 @@ try:
     xbytes = _fetch_excel_bytes(st.session_state.fixed_url, st.session_state.refresh_counter)
     name_hint = _guess_filename(st.session_state.fixed_url, None)
     local_path = _bytes_to_tempfile(xbytes, name_hint=name_hint)
-    st.session_state.last_updated = datetime.datetime.now(tz=BRT_TZ)  # hora de Brasília
+    # salva o horário como UTC e exibe convertido para Brasília (acima)
+    st.session_state.last_updated = datetime.datetime.now(datetime.timezone.utc)
 except Exception as e:
     st.error("Erro ao baixar a planilha do OneDrive. Verifique o link/compartilhamento.")
     st.exception(e)
@@ -455,13 +468,6 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# ---------- Arrow-safe antes de exibir/baixar ----------
-df_rec  = _make_arrow_safe(df_rec)
-df_exp  = _make_arrow_safe(df_exp)
-df_fast = _make_arrow_safe(df_fast)
-df_tran = _make_arrow_safe(df_tran)
-# -------------------------------------------------------
-
 # Gráfico resumo
 st.subheader("Resumo — Andamento das Operações")
 labels = ["Recebimento", "Expedição", "Fastfob", "Transbordo s/ Leitura"]
@@ -477,6 +483,42 @@ else:
 
 st.divider()
 
+# --- Preparar DataFrames para exibição (evitar ArrowTypeError em colunas mistas como QTD, FREETIME, etc.) ---
+def _coerce_freetime_to_str(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        # trata nomes típicos de FreeTime, case-insensitive
+        if str(col).strip().upper() in {"FREETIME", "FREE TIME", "FREE_TIME", "FREETIME (H)", "FREETIME(H)"}:
+            df[col] = df[col].astype(str)
+    return df
+
+def _df_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepara o DataFrame para exibição no Streamlit (compatível com Arrow):
+    - Converte FREETIME/variantes para texto
+    - Para cada coluna: se houver qualquer string OU dtype=object, converte a coluna inteira
+      para pandas StringDtype ("string[python]") — evita erros quando existem números misturados com textos (ex.: '???').
+    """
+    from pandas.api.types import is_object_dtype
+
+    df = _coerce_freetime_to_str(df.copy())
+
+    for c in df.columns:
+        s = df[c]
+        # Se já for object OU houver pelo menos uma string na coluna -> vira StringDtype
+        if is_object_dtype(s) or s.map(lambda x: isinstance(x, str)).any():
+            try:
+                df[c] = s.astype("string[python]")
+            except Exception:
+                # fallback: string normal
+                df[c] = s.astype(str)
+
+    return df
+
+df_rec_disp  = _df_for_display(df_rec)
+df_exp_disp  = _df_for_display(df_exp)
+df_fast_disp = _df_for_display(df_fast)
+df_tran_disp = _df_for_display(df_tran)
+
 # Detalhes por grupo
 opt = st.selectbox("Selecione o grupo", [UI_NAME_1, UI_NAME_2], index=0)
 st.divider()
@@ -489,25 +531,25 @@ if opt == UI_NAME_1:
         card_metric("EXPEDIÇÕES (total)", e_tot, legend=f"Finalizados: {e_fin} · Em andamento: {e_ab}")
 
     st.markdown("**Recebimento (A:Q)**")
-    st.dataframe(df_rec, width="stretch")
+    st.dataframe(df_rec_disp, width="stretch")
 
     st.markdown("**Expedição (U:AD)**")
-    st.dataframe(df_exp, width="stretch")
+    st.dataframe(df_exp_disp, width="stretch")
 
     col_a, col_b, _ = st.columns([1,1,2])
     with col_a:
-        if not df_rec.empty:
+        if not df_rec_disp.empty:
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-                df_rec.to_excel(xw, sheet_name="RECEBIMENTO", index=False)
+                df_rec_disp.to_excel(xw, sheet_name="RECEBIMENTO", index=False)
             st.download_button("Baixar RECEBIMENTO (.xlsx)", data=bio.getvalue(),
                                file_name="recebimento.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with col_b:
-        if not df_exp.empty:
+        if not df_exp_disp.empty:
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-                df_exp.to_excel(xw, sheet_name="EXPEDICAO", index=False)
+                df_exp_disp.to_excel(xw, sheet_name="EXPEDICAO", index=False)
             st.download_button("Baixar EXPEDIÇÃO (.xlsx)", data=bio.getvalue(),
                                file_name="expedicao.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -520,25 +562,25 @@ else:
         card_metric("TRANSBORDO S/ LEITURA (total)", t_tot, legend=f"Finalizados: {t_fin} · Em andamento: {t_ab}")
 
     st.markdown("**FASTFOB (A:N)**")
-    st.dataframe(df_fast, width="stretch")
+    st.dataframe(df_fast_disp, width="stretch")
 
     st.markdown("**TRANSBORDO (P:AA)**")
-    st.dataframe(df_tran, width="stretch")
+    st.dataframe(df_tran_disp, width="stretch")
 
     col_c, col_d, _ = st.columns([1,1,2])
     with col_c:
-        if not df_fast.empty:
+        if not df_fast_disp.empty:
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-                df_fast.to_excel(xw, sheet_name="FASTFOB", index=False)
+                df_fast_disp.to_excel(xw, sheet_name="FASTFOB", index=False)
             st.download_button("Baixar FASTFOB (.xlsx)", data=bio.getvalue(),
                                file_name="fastfob.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with col_d:
-        if not df_tran.empty:
+        if not df_tran_disp.empty:
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-                df_tran.to_excel(xw, sheet_name="TRANSBORDO", index=False)
+                df_tran_disp.to_excel(xw, sheet_name="TRANSBORDO", index=False)
             st.download_button("Baixar TRANSBORDO (.xlsx)", data=bio.getvalue(),
                                file_name="transbordo.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

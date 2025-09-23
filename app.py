@@ -17,6 +17,14 @@ import requests
 import pandas as pd
 import streamlit as st
 
+# Fuso horário Brasil
+from datetime import timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    BRT_TZ = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    BRT_TZ = timezone(timedelta(hours=-3))
+
 # Tenta Plotly; se não, cai para Altair
 HAS_PLOTLY = True
 try:
@@ -25,8 +33,7 @@ except Exception:
     HAS_PLOTLY = False
 
 # ================== CONFIG ==================
-# >>> COLOQUE AQUI O LINK PERMANENTE DO ONEDRIVE <<<
-DEFAULT_ONEDRIVE_URL = r"https://tecadi-my.sharepoint.com/:x:/g/personal/rafael_alves_tecadi_com_br/EaJshSFavb5Pv8z_dpW3ZWwBVhjuG3tFcYeSRUMWSEbYyg"  # ex.: r"https://teu-dominio-my.sharepoint.com/....?download=1"
+DEFAULT_ONEDRIVE_URL = r"https://tecadi-my.sharepoint.com/:x:/g/personal/rafael_alves_tecadi_com_br/EaJshSFavb5Pv8z_dpW3ZWwBVhjuG3tFcYeSRUMWSEbYyg"
 DEFAULT_ONEDRIVE_URL = os.environ.get("MIDEA_ONEDRIVE_URL", DEFAULT_ONEDRIVE_URL)
 
 TARGET_SHEET_1 = "PROGRAMAÇÃO DIÁRIA"
@@ -186,6 +193,31 @@ def count_area_status_filtered(path: str, sheet_name: str, area_key: str, requir
     em_aberto = total - finalizados
     return total, finalizados, em_aberto, df
 
+# --------- NEW: tornar DataFrames seguros para o Arrow/Streamlit ----------
+def _make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """Converte colunas com tipos mistos para string e força FREETIME como texto."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    # força FREETIME para string (variações comuns de nome)
+    target_names = {"FREETIME", "FREE TIME", "FREE-TIME"}
+    upper_cols = {str(c).strip().upper(): c for c in df.columns}
+    for up, real in upper_cols.items():
+        if up in target_names:
+            df[real] = df[real].apply(lambda x: "" if pd.isna(x) else str(x))
+    # qualquer outra coluna com tipos mistos (exclui numérica e datetime)
+    for c in df.columns:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
+            continue
+        # se tem mais de um tipo (ignora NaN), converte para string
+        types = {type(x) for x in s.dropna().values}
+        if len(types) > 1:
+            df[c] = s.apply(lambda x: "" if pd.isna(x) else str(x))
+    return df
+# --------------------------------------------------------------------------
+
 # ================== THEME & CSS ==================
 def _mime_from_path(p: str) -> str:
     ext = os.path.splitext(p)[1].lower()
@@ -229,7 +261,6 @@ def _inject_theme_and_background():
 
     st.markdown(f"""
     <style>
-    /* esconder toolbar/Deploy, header e footer */
     div[data-testid="stToolbar"], div[data-testid="stStatusWidget"], div[data-testid="stDecoration"] {{ display: none !important; }}
     #MainMenu {{ visibility: hidden; }}
     header {{ visibility: hidden; height: 0; }}
@@ -238,17 +269,13 @@ def _inject_theme_and_background():
     {bg_css}
     {logo_css}
 
-    /* texto branco no app todo, exceto dataframes */
     .block-container, .block-container *:not([data-testid="stDataFrame"] *),
     h1, h2, h3, h4, h5, h6, p, label, span {{ color: #fff !important; }}
 
-    /* DataFrames com texto escuro para legibilidade */
     div[data-testid="stDataFrame"] * {{ color: #111 !important; }}
 
-    /* subir conteúdo */
     .block-container {{ padding-top: 0.6rem !important; }}
 
-    /* cards (glass + borda ciano) */
     .card {{
         background: rgba(255,255,255,0.08);
         border: 3px solid rgba(0, 190, 255, 0.55);
@@ -263,11 +290,8 @@ def _inject_theme_and_background():
         color:#e9faff; font-weight:700; letter-spacing:.2px; margin-bottom: 6px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,.25);
     }}
-    div[data-testid="stMetricValue"] {{
-        font-size: 48px !important; line-height: 1.0 !important; margin-top: 2px !important;
-    }}
+    div[data-testid="stMetricValue"] {{ font-size: 48px !important; line-height: 1.0 !important; margin-top: 2px !important; }}
 
-    /* ---- Botões padrão (st.button) ---- */
     .stButton button {{
       background: rgba(0, 120, 255, 0.90) !important;
       color: #ffffff !important;
@@ -276,50 +300,24 @@ def _inject_theme_and_background():
       padding: 8px 14px !important;
       box-shadow: 0 3px 12px rgba(0,0,0,0.25) !important;
     }}
-    .stButton button:hover {{
-      filter: brightness(1.06);
-      transform: translateY(-1px);
-    }}
+    .stButton button:hover {{ filter: brightness(1.06); transform: translateY(-1px); }}
 
-    /* ---- Selectbox ALTO CONTRASTE ---- */
-    .stSelectbox label {{
-      color:#fff !important;
-      font-weight:700;
-    }}
-    /* Caixa do select */
+    .stSelectbox label {{ color:#fff !important; font-weight:700; }}
     .stSelectbox [data-baseweb="select"] > div {{
-      background:#0F2846 !important;                 /* fundo escuro */
-      border:2px solid #00BFFF !important;           /* borda ciano */
+      background:#0F2846 !important;
+      border:2px solid #00BFFF !important;
       border-radius:14px !important;
       min-height:52px;
       box-shadow:0 3px 12px rgba(0,0,0,.25);
     }}
-    /* Texto/placeholder/seta brancos */
-    .stSelectbox [data-baseweb="select"] * {{
-      color:#fff !important;
-    }}
-    .stSelectbox [data-baseweb="select"] svg {{
-      fill:#fff !important;
-    }}
-    /* Menu suspenso */
-    ul[role="listbox"] {{
-      background:#0F2846 !important;
-      color:#fff !important;
-      border:1px solid #00BFFF !important;
-    }}
-    ul[role="listbox"] li {{
-      color:#fff !important;
-    }}
-    ul[role="listbox"] li:hover {{
-      background:rgba(0,191,255,.15) !important;
-    }}
-    /* (opcional) maior destaque no item selecionado */
-    .stSelectbox [data-baseweb="select"] > div > div {{
-      font-size:1.05rem;
-      font-weight:700;
-    }}
+    .stSelectbox [data-baseweb="select"] * {{ color:#fff !important; }}
+    .stSelectbox [data-baseweb="select"] svg {{ fill:#fff !important; }}
+    ul[role="listbox"] {{ background:#0F2846 !important; color:#fff !important; border:1px solid #00BFFF !important; }}
+    ul[role="listbox"] li {{ color:#fff !important; }}
+    ul[role="listbox"] li:hover {{ background:rgba(0,191,255,.15) !important; }}
 
-    /* botões de download */
+    .stSelectbox [data-baseweb="select"] > div > div {{ font-size:1.05rem; font-weight:700; }}
+
     div[data-testid="stDownloadButton"] button,
     div[data-testid="stDownloadButton"] > div > button {{
         background: rgba(0, 120, 255, 0.9) !important; color: #fff !important;
@@ -340,8 +338,11 @@ def card_metric(title: str, value: int | float | str, legend: str = ""):
         st.markdown("</div>", unsafe_allow_html=True)
 
 def build_overview_chart(labels, finalizados, em_aberto, totais):
+    """Gráfico com folga no topo para não cortar os números e texto sem clip."""
     cor_andamento = "#425F96"   # Em andamento
     cor_finalizado = "#177833"  # Finalizado
+    headroom = 1.25 * (max(totais) if len(totais) else 0)
+
     if HAS_PLOTLY:
         fig = go.Figure()
         fig.add_trace(go.Bar(x=labels, y=em_aberto,   name="Em andamento",
@@ -356,20 +357,18 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
                                  textfont=dict(size=18, color="#FFFFFF"),
                                  hoverinfo="skip", showlegend=False))
         fig.update_layout(
-            barmode="stack", height=360, margin=dict(l=10, r=10, t=10, b=10),
+            barmode="stack", height=360,
+            margin=dict(l=10, r=10, t=40, b=10),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#FFFFFF"),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom", y=1.02,
-                xanchor="right", x=1,
-                font=dict(color="#FFFFFF")   # <<< legenda branca
-            )
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        fig.update_xaxes(tickfont=dict(color="#FFFFFF"), color="#FFFFFF",
-                         gridcolor="rgba(255,255,255,0.15)")
-        fig.update_yaxes(tickfont=dict(color="#FFFFFF"), color="#FFFFFF",
-                         gridcolor="rgba(255,255,255,0.15)")
+        fig.update_yaxes(range=[0, headroom], automargin=True,
+                         gridcolor="rgba(255,255,255,0.15)",
+                         tickfont=dict(color="#FFFFFF"), color="#FFFFFF")
+        fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)",
+                         tickfont=dict(color="#FFFFFF"), color="#FFFFFF")
+        fig.update_traces(cliponaxis=False, selector=dict(type='scatter'))
         return fig, "plotly"
     else:
         import altair as alt
@@ -383,27 +382,25 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
             alt.Chart(df_long).mark_bar()
             .encode(
                 x=alt.X("Operacao:N", axis=alt.Axis(labelColor="white", title=None)),
-                y=alt.Y("Valor:Q", stack="zero", axis=alt.Axis(labelColor="white", title=None)),
+                y=alt.Y("Valor:Q", stack="zero",
+                        axis=alt.Axis(labelColor="white", title=None),
+                        scale=alt.Scale(domain=[0, headroom])),
                 color=alt.Color("Status:N",
                                 scale=alt.Scale(domain=["Em andamento", "Finalizado"],
-                                                range=[cor_andamento, cor_finalizado]),
+                                                range=["#425F96", "#177833"]),
                                 legend=alt.Legend(labelColor="white", titleColor="white"))
             )
             .properties(height=320).configure_view(stroke=None)
         )
         txt = alt.Chart(df).mark_text(color="white", dy=-6, fontSize=18)\
-            .encode(x=alt.X("Operacao:N"), y=alt.Y("Total:Q"), text="Total:Q")
+            .encode(x=alt.X("Operacao:N"),
+                    y=alt.Y("Total:Q", scale=alt.Scale(domain=[0, headroom])),
+                    text="Total:Q")
         return (chart + txt).configure_axis(grid=False, labelColor="white", titleColor="white"), "altair"
 
 # ================== APP ==================
-# Define favicon + título
 page_icon_path = next((p for p in FAVICON_CANDIDATES if os.path.exists(p)), None)
-st.set_page_config(
-    page_title="MIDEA - Overview (Tecadi)",
-    page_icon=page_icon_path,
-    layout="wide"
-)
-
+st.set_page_config(page_title="MIDEA - Overview (Tecadi)", page_icon=page_icon_path, layout="wide")
 _inject_theme_and_background()
 
 if "refresh_counter" not in st.session_state:
@@ -420,11 +417,10 @@ with top_r:
         st.session_state.refresh_counter += 1
         st.rerun()
     if st.session_state.last_updated:
-        st.caption(f"Atualizado: {st.session_state.last_updated:%d/%m %H:%M:%S}")
+        st.caption(f"Atualizado: {st.session_state.last_updated:%d/%m %H:%M:%S} (Brasília)")
 
 st.caption("Versão v1.0 — Overview & Exportações")
 
-# Link fixo ou entrada manual
 if not st.session_state.fixed_url:
     st.subheader("Informe o link do OneDrive para iniciar")
     link = st.text_input("Link do OneDrive (compartilhado)", placeholder="cole aqui o link do arquivo…")
@@ -442,7 +438,7 @@ try:
     xbytes = _fetch_excel_bytes(st.session_state.fixed_url, st.session_state.refresh_counter)
     name_hint = _guess_filename(st.session_state.fixed_url, None)
     local_path = _bytes_to_tempfile(xbytes, name_hint=name_hint)
-    st.session_state.last_updated = datetime.datetime.now()
+    st.session_state.last_updated = datetime.datetime.now(tz=BRT_TZ)  # hora de Brasília
 except Exception as e:
     st.error("Erro ao baixar a planilha do OneDrive. Verifique o link/compartilhamento.")
     st.exception(e)
@@ -459,6 +455,13 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
+# ---------- Arrow-safe antes de exibir/baixar ----------
+df_rec  = _make_arrow_safe(df_rec)
+df_exp  = _make_arrow_safe(df_exp)
+df_fast = _make_arrow_safe(df_fast)
+df_tran = _make_arrow_safe(df_tran)
+# -------------------------------------------------------
+
 # Gráfico resumo
 st.subheader("Resumo — Andamento das Operações")
 labels = ["Recebimento", "Expedição", "Fastfob", "Transbordo s/ Leitura"]
@@ -468,9 +471,9 @@ totais      = [r_tot, e_tot, f_tot, t_tot]
 
 chart, kind = build_overview_chart(labels, finalizados, em_aberto, totais)
 if kind == "plotly":
-    st.plotly_chart(chart, use_container_width=True)
+    st.plotly_chart(chart, width="stretch")
 else:
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 st.divider()
 
@@ -486,10 +489,10 @@ if opt == UI_NAME_1:
         card_metric("EXPEDIÇÕES (total)", e_tot, legend=f"Finalizados: {e_fin} · Em andamento: {e_ab}")
 
     st.markdown("**Recebimento (A:Q)**")
-    st.dataframe(df_rec, use_container_width=True)
+    st.dataframe(df_rec, width="stretch")
 
     st.markdown("**Expedição (U:AD)**")
-    st.dataframe(df_exp, use_container_width=True)
+    st.dataframe(df_exp, width="stretch")
 
     col_a, col_b, _ = st.columns([1,1,2])
     with col_a:
@@ -517,10 +520,10 @@ else:
         card_metric("TRANSBORDO S/ LEITURA (total)", t_tot, legend=f"Finalizados: {t_fin} · Em andamento: {t_ab}")
 
     st.markdown("**FASTFOB (A:N)**")
-    st.dataframe(df_fast, use_container_width=True)
+    st.dataframe(df_fast, width="stretch")
 
     st.markdown("**TRANSBORDO (P:AA)**")
-    st.dataframe(df_tran, use_container_width=True)
+    st.dataframe(df_tran, width="stretch")
 
     col_c, col_d, _ = st.columns([1,1,2])
     with col_c:

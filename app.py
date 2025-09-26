@@ -10,6 +10,7 @@ Ajustes:
 - Forçar FREETIME (ou variantes) para texto, evitando ArrowTypeError
 - Converter colunas com qualquer texto/objeto para pandas StringDtype (ex.: QTD com '???')
 - Horário em America/Sao_Paulo (Brasília)
+- DEVOLUÇÃO/CANCELAMENTO: validadores de linha para ignorar segundo cabeçalho/linhas “0”
 """
 
 from __future__ import annotations
@@ -39,17 +40,23 @@ HEADER_ROW = 5
 
 AREAS = {
     TARGET_SHEET_1: {
-        "RECEBIMENTO": {"cols": ("A", "Q"),  "status_col": "J"},
-        "EXPEDIACAO":  {"cols": ("U", "AD"), "status_col": "AB"},
+        "RECEBIMENTO":  {"cols": ("A", "Q"),  "status_col": "J"},
+        "EXPEDIACAO":   {"cols": ("U", "AD"), "status_col": "AB"},
+        # DEVOLUÇÃO: AH:AU, status AR, denominador/validador em AK (DATA)
+        "DEVOLUCAO":    {"cols": ("AH", "AU"), "status_col": "AR"},
+        # CANCELAMENTO: AZ:BD, status BB, denominador/validador em BA (OS)
+        "CANCELAMENTO": {"cols": ("AZ", "BD"), "status_col": "BB"},
     },
     TARGET_SHEET_2: {
-        "FASTFOB":     {"cols": ("A", "N"),  "status_col": "J"},   # filtra por ABS 'C' (Armador)
+        # FASTFOB -> STATUS é K (não J)
+        "FASTFOB":     {"cols": ("A", "N"),  "status_col": "K"},   # filtra por ABS 'C' (Armador)
         "TRANSBORDO":  {"cols": ("P", "AA"), "status_col": "X"},   # filtra por ABS 'R' (Container)
     },
 }
 
 UI_NAME_1 = "Recebimento & Expedição"
 UI_NAME_2 = "Transbordos & Fastfob"
+UI_NAME_3 = "Devolução & Cancelamento"
 
 BG_PATH_CANDIDATES = [
     r"C:\Users\felipe.nonato\Music\Projetos\10 - OV Midea\fundoapp.jpg",
@@ -82,7 +89,6 @@ def is_filled(val) -> bool:
     return s != "" and s.lower() != "none"
 
 def clean_onedrive_url(url: str) -> str:
-    # mantem ?download=1 se já estiver
     if not url:
         return url
     if "download=1" not in url:
@@ -108,15 +114,9 @@ def _safe_ext_from_name(name: str) -> str:
 
 @st.cache_data(show_spinner="Baixando arquivo do OneDrive…")
 def _fetch_excel_bytes(url: str, refresh_key: int) -> bytes:
-    """
-    Busca o Excel do OneDrive, furando caches:
-      - mantém ?download=1
-      - adiciona 'nocache=<refresh_key>_<timestamp>' para impedir cache do SharePoint/CDN
-    """
     final_url = clean_onedrive_url(url)
     sep = "&" if "?" in final_url else "?"
     final_url = f"{final_url}{sep}nocache={refresh_key}_{int(time.time())}"
-
     with requests.get(final_url, stream=True, timeout=60, allow_redirects=True) as r:
         r.raise_for_status()
         return r.content
@@ -171,7 +171,41 @@ def _rel_idx_from_abs_letter(abs_letter: str, area_cols: tuple[str, str]) -> int
         return None
     return abs_i - start
 
-def count_area_status_filtered(path: str, sheet_name: str, area_key: str, required_abs_col: str | None = None):
+# ---- Validadores específicos para evitar "segundo cabeçalho" ----
+def _is_date_like(val) -> bool:
+    """True se for data válida (datetime/date ou string que vira data)."""
+    if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
+        return True
+    s = str(val).strip()
+    if s in ("", "0", "TOTAL"):
+        return False
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        return pd.notna(dt)
+    except Exception:
+        return False
+
+_os_re = re.compile(r"^[A-Za-z]\d{3,}$")
+def _looks_like_os(val) -> bool:
+    """True para OS no formato típico (ex.: A37750)."""
+    if val is None:
+        return False
+    s = str(val).strip()
+    if s in ("", "0", "TOTAL"):
+        return False
+    return bool(_os_re.match(s))
+
+def count_area_status_filtered(
+    path: str,
+    sheet_name: str,
+    area_key: str,
+    required_abs_col: str | None = None,
+    required_validator=None,
+):
+    """Lê o intervalo da área e aplica:
+       - filtro por required_abs_col (se fornecido), usando required_validator (se fornecido);
+       - depois contabiliza STATUS (finalizado vs em aberto).
+    """
     from openpyxl.utils import column_index_from_string
 
     area = AREAS[sheet_name][area_key]
@@ -188,7 +222,10 @@ def count_area_status_filtered(path: str, sheet_name: str, area_key: str, requir
         rel_req = _rel_idx_from_abs_letter(required_abs_col, area["cols"])
         if rel_req is not None and rel_req < len(df.columns):
             ser = df.iloc[:, rel_req]
-            mask = ser.apply(is_filled)
+            if required_validator is not None:
+                mask = ser.apply(required_validator)
+            else:
+                mask = ser.apply(is_filled)
             df = df[mask].copy()
 
     total = len(df.index)
@@ -242,7 +279,6 @@ def _inject_theme_and_background():
 
     st.markdown(f"""
     <style>
-    /* esconder toolbar/Deploy, header e footer */
     div[data-testid="stToolbar"], div[data-testid="stStatusWidget"], div[data-testid="stDecoration"] {{ display: none !important; }}
     #MainMenu {{ visibility: hidden; }}
     header {{ visibility: hidden; height: 0; }}
@@ -251,11 +287,9 @@ def _inject_theme_and_background():
     {bg_css}
     {logo_css}
 
-    /* texto branco global (exceto DataFrames) */
     .block-container, .block-container *:not([data-testid="stDataFrame"] *),
     h1, h2, h3, h4, h5, h6, p, label, span {{ color: #fff !important; }}
 
-    /* DataFrames com texto escuro para legibilidade */
     div[data-testid="stDataFrame"] * {{ color: #111 !important; }}
 
     .block-container {{ padding-top: 0.6rem !important; }}
@@ -278,7 +312,6 @@ def _inject_theme_and_background():
         font-size: 48px !important; line-height: 1.0 !important; margin-top: 2px !important;
     }}
 
-    /* ---- Botões padrão (st.button) ---- */
     .stButton button {{
       background: rgba(0, 120, 255, 0.90) !important;
       color: #ffffff !important;
@@ -292,32 +325,18 @@ def _inject_theme_and_background():
       transform: translateY(-1px);
     }}
 
-    /* ---- Selectbox ALTO CONTRASTE ---- */
-    .stSelectbox label {{
-      color:#fff !important;
-      font-weight:700;
-    }}
+    .stSelectbox label {{ color:#fff !important; font-weight:700; }}
     .stSelectbox [data-baseweb="select"] > div {{
-      background:#0F2846 !important;
-      border:2px solid #00BFFF !important;
-      border-radius:14px !important;
-      min-height:52px;
-      box-shadow:0 3px 12px rgba(0,0,0,.25);
+      background:#0F2846 !important; border:2px solid #00BFFF !important; border-radius:14px !important;
+      min-height:52px; box-shadow:0 3px 12px rgba(0,0,0,.25);
     }}
     .stSelectbox [data-baseweb="select"] * {{ color:#fff !important; }}
     .stSelectbox [data-baseweb="select"] svg {{ fill:#fff !important; }}
-    ul[role="listbox"] {{
-      background:#0F2846 !important;
-      color:#fff !important;
-      border:1px solid #00BFFF !important;
-    }}
+    ul[role="listbox"] {{ background:#0F2846 !important; color:#fff !important; border:1px solid #00BFFF !important; }}
     ul[role="listbox"] li {{ color:#fff !important; }}
     ul[role="listbox"] li:hover {{ background:rgba(0,191,255,.15) !important; }}
-    .stSelectbox [data-baseweb="select"] > div > div {{
-      font-size:1.05rem; font-weight:700;
-    }}
+    .stSelectbox [data-baseweb="select"] > div > div {{ font-size:1.05rem; font-weight:700; }}
 
-    /* botões de download */
     div[data-testid="stDownloadButton"] button,
     div[data-testid="stDownloadButton"] > div > button {{
         background: rgba(0, 120, 255, 0.9) !important; color: #fff !important;
@@ -325,6 +344,11 @@ def _inject_theme_and_background():
         padding: 8px 14px !important; box-shadow: 0 3px 12px rgba(0,0,0,0.25) !important;
     }}
     div[data-testid="stDownloadButton"] button:hover {{ filter: brightness(1.06); transform: translateY(-1px); }}
+
+    /* === LEGENDA DO PLOTLY EM BRANCO === */
+    .js-plotly-plot .legend text,
+    .js-plotly-plot .legend .legendtext,
+    .js-plotly-plot .legend .legendtitle {{ fill:#ffffff !important; color:#ffffff !important; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -338,8 +362,8 @@ def card_metric(title: str, value: int | float | str, legend: str = ""):
         st.markdown("</div>", unsafe_allow_html=True)
 
 def build_overview_chart(labels, finalizados, em_aberto, totais):
-    cor_andamento = "#425F96"   # Em andamento
-    cor_finalizado = "#177833"  # Finalizado
+    cor_andamento = "#425F96"
+    cor_finalizado = "#177833"
     if HAS_PLOTLY:
         fig = go.Figure()
         fig.add_trace(go.Bar(x=labels, y=em_aberto,   name="Em andamento",
@@ -355,8 +379,8 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
                                  hoverinfo="skip", showlegend=False))
         fig.update_layout(
             barmode="stack",
-            height=420,                          # um pouco mais alto para não cortar o label
-            margin=dict(l=10, r=10, t=30, b=10), # top maior
+            height=420,
+            margin=dict(l=10, r=10, t=30, b=10),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#FFFFFF"),
             legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1)
@@ -391,19 +415,11 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
         return (chart + txt).configure_axis(grid=False, labelColor="white", titleColor="white"), "altair"
 
 # ================== APP ==================
-# Define favicon + título
 page_icon_path = next((p for p in FAVICON_CANDIDATES if os.path.exists(p)), None)
-st.set_page_config(
-    page_title="MIDEA - Overview (Tecadi)",
-    page_icon=page_icon_path,
-    layout="wide"
-)
-
+st.set_page_config(page_title="MIDEA - Overview (Tecadi)", page_icon=page_icon_path, layout="wide")
 _inject_theme_and_background()
 
-# --- Estado de sessão ---
 if "refresh_counter" not in st.session_state:
-    # força a PRIMEIRA carga da sessão a ser única (pega sempre a versão mais recente)
     st.session_state.refresh_counter = int(time.time())
 if "last_updated" not in st.session_state:
     st.session_state.last_updated = None
@@ -412,9 +428,8 @@ if "fixed_url" not in st.session_state:
 
 st.title("MIDEA — Overview Operação (Diário)")
 
-# Botão de atualizar + relógio em Brasília
 try:
-    from zoneinfo import ZoneInfo  # py>=3.9
+    from zoneinfo import ZoneInfo
     tz_br = ZoneInfo("America/Sao_Paulo")
 except Exception:
     tz_br = None
@@ -430,9 +445,8 @@ with top_r:
         else:
             st.caption(f"Atualizado: {st.session_state.last_updated:%d/%m %H:%M:%S}")
 
-st.caption("Versão v1.0 — Overview & Exportações")
+st.caption("Versão v1.1 — Overview & Exportações")
 
-# Link fixo ou entrada manual (fallback)
 if not st.session_state.fixed_url:
     st.subheader("Informe o link do OneDrive para iniciar")
     link = st.text_input("Link do OneDrive (compartilhado)", placeholder="cole aqui o link do arquivo…")
@@ -445,12 +459,10 @@ if not st.session_state.fixed_url:
             st.rerun()
     st.stop()
 
-# Download + path temporário
 try:
     xbytes = _fetch_excel_bytes(st.session_state.fixed_url, st.session_state.refresh_counter)
     name_hint = _guess_filename(st.session_state.fixed_url, None)
     local_path = _bytes_to_tempfile(xbytes, name_hint=name_hint)
-    # salva o horário como UTC e exibe convertido para Brasília (acima)
     st.session_state.last_updated = datetime.datetime.now(datetime.timezone.utc)
 except Exception as e:
     st.error("Erro ao baixar a planilha do OneDrive. Verifique o link/compartilhamento.")
@@ -463,12 +475,20 @@ try:
     e_tot, e_fin, e_ab, df_exp   = count_area_status_filtered(local_path, TARGET_SHEET_1, "EXPEDIACAO")
     f_tot, f_fin, f_ab, df_fast  = count_area_status_filtered(local_path, TARGET_SHEET_2, "FASTFOB",    required_abs_col="C")
     t_tot, t_fin, t_ab, df_tran  = count_area_status_filtered(local_path, TARGET_SHEET_2, "TRANSBORDO", required_abs_col="R")
+
+    # >>> DEVOLUÇÃO/CANCELAMENTO com validadores <<<
+    d_tot, d_fin, d_ab, df_devol = count_area_status_filtered(
+        local_path, TARGET_SHEET_1, "DEVOLUCAO", required_abs_col="AK", required_validator=_is_date_like
+    )
+    c_tot, c_fin, c_ab, df_canc  = count_area_status_filtered(
+        local_path, TARGET_SHEET_1, "CANCELAMENTO", required_abs_col="BA", required_validator=_looks_like_os
+    )
 except Exception as e:
     st.error("Erro ao ler planilha. Verifique as abas/intervalos.")
     st.exception(e)
     st.stop()
 
-# Gráfico resumo
+# Gráfico resumo (4 barras originais)
 st.subheader("Resumo — Andamento das Operações")
 labels = ["Recebimento", "Expedição", "Fastfob", "Transbordo s/ Leitura"]
 finalizados = [r_fin, e_fin, f_fin, t_fin]
@@ -483,44 +503,34 @@ else:
 
 st.divider()
 
-# --- Preparar DataFrames para exibição (evitar ArrowTypeError em colunas mistas como QTD, FREETIME, etc.) ---
+# ---- Arrow-friendly DataFrames ----
 def _coerce_freetime_to_str(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
-        # trata nomes típicos de FreeTime, case-insensitive
         if str(col).strip().upper() in {"FREETIME", "FREE TIME", "FREE_TIME", "FREETIME (H)", "FREETIME(H)"}:
             df[col] = df[col].astype(str)
     return df
 
 def _df_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepara o DataFrame para exibição no Streamlit (compatível com Arrow):
-    - Converte FREETIME/variantes para texto
-    - Para cada coluna: se houver qualquer string OU dtype=object, converte a coluna inteira
-      para pandas StringDtype ("string[python]") — evita erros quando existem números misturados com textos (ex.: '???').
-    """
     from pandas.api.types import is_object_dtype
-
     df = _coerce_freetime_to_str(df.copy())
-
     for c in df.columns:
         s = df[c]
-        # Se já for object OU houver pelo menos uma string na coluna -> vira StringDtype
         if is_object_dtype(s) or s.map(lambda x: isinstance(x, str)).any():
             try:
                 df[c] = s.astype("string[python]")
             except Exception:
-                # fallback: string normal
                 df[c] = s.astype(str)
-
     return df
 
-df_rec_disp  = _df_for_display(df_rec)
-df_exp_disp  = _df_for_display(df_exp)
-df_fast_disp = _df_for_display(df_fast)
-df_tran_disp = _df_for_display(df_tran)
+df_rec_disp   = _df_for_display(df_rec)
+df_exp_disp   = _df_for_display(df_exp)
+df_fast_disp  = _df_for_display(df_fast)
+df_tran_disp  = _df_for_display(df_tran)
+df_devol_disp = _df_for_display(df_devol)
+df_canc_disp  = _df_for_display(df_canc)
 
 # Detalhes por grupo
-opt = st.selectbox("Selecione o grupo", [UI_NAME_1, UI_NAME_2], index=0)
+opt = st.selectbox("Selecione o grupo", [UI_NAME_1, UI_NAME_2, UI_NAME_3], index=0)
 st.divider()
 
 if opt == UI_NAME_1:
@@ -554,7 +564,7 @@ if opt == UI_NAME_1:
                                file_name="expedicao.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-else:
+elif opt == UI_NAME_2:
     c1, c2 = st.columns(2)
     with c1:
         card_metric("FASTFOB (total)", f_tot, legend=f"Finalizados: {f_fin} · Em andamento: {f_ab}")
@@ -585,5 +595,36 @@ else:
                                file_name="transbordo.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+else:  # UI_NAME_3 -> Devolução & Cancelamento
+    c1, c2 = st.columns(2)
+    with c1:
+        card_metric("DEVOLUÇÕES (total)", d_tot, legend=f"Finalizados: {d_fin} · Em andamento: {d_ab}")
+    with c2:
+        card_metric("CANCELAMENTOS (total)", c_tot, legend=f"Finalizados: {c_fin} · Em andamento: {c_ab}")
+
+    st.markdown("**DEVOLUÇÃO (AH:AU)**")
+    st.dataframe(df_devol_disp, width="stretch")
+
+    st.markdown("**CANCELAMENTO (AZ:BD)**")
+    st.dataframe(df_canc_disp, width="stretch")
+
+    col_e, col_f, _ = st.columns([1,1,2])
+    with col_e:
+        if not df_devol_disp.empty:
+            bio = io.BytesIO()
+            with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+                df_devol_disp.to_excel(xw, sheet_name="DEVOLUCAO", index=False)
+            st.download_button("Baixar DEVOLUÇÃO (.xlsx)", data=bio.getvalue(),
+                               file_name="devolucao.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with col_f:
+        if not df_canc_disp.empty:
+            bio = io.BytesIO()
+            with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+                df_canc_disp.to_excel(xw, sheet_name="CANCELAMENTO", index=False)
+            st.download_button("Baixar CANCELAMENTO (.xlsx)", data=bio.getvalue(),
+                               file_name="cancelamento.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 # Rodapé fixo
-st.caption("© Tecadi — versão v1.0. Autor: FG • Contato: felipe.nonato@tecadi.com.br")
+st.caption("© Tecadi — versão v1.1. Autor: FG • Contato: felipe.nonato@tecadi.com.br")

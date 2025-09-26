@@ -1,6 +1,5 @@
-streamlit
-pandas
-openpyxl
-requests
-plotly
-altair
+streamlit==1.39.0
+plotly>=5.24.1
+pandas>=2.2.2
+openpyxl>=3.1.5
+requests>=2.32.3

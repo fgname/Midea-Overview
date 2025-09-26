@@ -6,11 +6,13 @@ Ajustes:
 - Carregar sempre a versão mais recente ao abrir (sem clicar em Atualizar)
 - Cache-buster (nocache=) para furar cache do SharePoint/CDN/Streamlit
 - Botão Atualizar continua funcionando
-- width="stretch" no lugar de use_container_width
+- width="stretch" no st.plotly_chart (com fallback automático)
+- Para tabelas: use_container_width=True (st.dataframe)
 - Forçar FREETIME (ou variantes) para texto, evitando ArrowTypeError
 - Converter colunas com qualquer texto/objeto para pandas StringDtype (ex.: QTD com '???')
 - Horário em America/Sao_Paulo (Brasília)
 - DEVOLUÇÃO/CANCELAMENTO: validadores de linha para ignorar segundo cabeçalho/linhas “0”
+- Legenda do gráfico em branco
 """
 
 from __future__ import annotations
@@ -344,11 +346,6 @@ def _inject_theme_and_background():
         padding: 8px 14px !important; box-shadow: 0 3px 12px rgba(0,0,0,0.25) !important;
     }}
     div[data-testid="stDownloadButton"] button:hover {{ filter: brightness(1.06); transform: translateY(-1px); }}
-
-    /* === LEGENDA DO PLOTLY EM BRANCO === */
-    .js-plotly-plot .legend text,
-    .js-plotly-plot .legend .legendtext,
-    .js-plotly-plot .legend .legendtitle {{ fill:#ffffff !important; color:#ffffff !important; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -383,7 +380,10 @@ def build_overview_chart(labels, finalizados, em_aberto, totais):
             margin=dict(l=10, r=10, t=30, b=10),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#FFFFFF"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1)
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1,
+                font=dict(color="#FFFFFF")
+            ),
         )
         fig.update_xaxes(tickfont=dict(color="#FFFFFF"), color="#FFFFFF",
                          gridcolor="rgba(255,255,255,0.15)")
@@ -497,9 +497,13 @@ totais      = [r_tot, e_tot, f_tot, t_tot]
 
 chart, kind = build_overview_chart(labels, finalizados, em_aberto, totais)
 if kind == "plotly":
-    st.plotly_chart(chart, width="stretch")
+    # usa width="stretch"; se a versão do Streamlit não suportar, cai para use_container_width=True
+    try:
+        st.plotly_chart(chart, width="stretch", config={"displayModeBar": False})
+    except TypeError:
+        st.plotly_chart(chart, use_container_width=True, config={"displayModeBar": False})
 else:
-    st.altair_chart(chart, width="stretch")
+    st.altair_chart(chart, use_container_width=True)
 
 st.divider()
 
@@ -541,10 +545,10 @@ if opt == UI_NAME_1:
         card_metric("EXPEDIÇÕES (total)", e_tot, legend=f"Finalizados: {e_fin} · Em andamento: {e_ab}")
 
     st.markdown("**Recebimento (A:Q)**")
-    st.dataframe(df_rec_disp, width="stretch")
+    st.dataframe(df_rec_disp, use_container_width=True)
 
     st.markdown("**Expedição (U:AD)**")
-    st.dataframe(df_exp_disp, width="stretch")
+    st.dataframe(df_exp_disp, use_container_width=True)
 
     col_a, col_b, _ = st.columns([1,1,2])
     with col_a:
@@ -572,10 +576,10 @@ elif opt == UI_NAME_2:
         card_metric("TRANSBORDO S/ LEITURA (total)", t_tot, legend=f"Finalizados: {t_fin} · Em andamento: {t_ab}")
 
     st.markdown("**FASTFOB (A:N)**")
-    st.dataframe(df_fast_disp, width="stretch")
+    st.dataframe(df_fast_disp, use_container_width=True)
 
     st.markdown("**TRANSBORDO (P:AA)**")
-    st.dataframe(df_tran_disp, width="stretch")
+    st.dataframe(df_tran_disp, use_container_width=True)
 
     col_c, col_d, _ = st.columns([1,1,2])
     with col_c:
@@ -603,10 +607,10 @@ else:  # UI_NAME_3 -> Devolução & Cancelamento
         card_metric("CANCELAMENTOS (total)", c_tot, legend=f"Finalizados: {c_fin} · Em andamento: {c_ab}")
 
     st.markdown("**DEVOLUÇÃO (AH:AU)**")
-    st.dataframe(df_devol_disp, width="stretch")
+    st.dataframe(df_devol_disp, use_container_width=True)
 
     st.markdown("**CANCELAMENTO (AZ:BD)**")
-    st.dataframe(df_canc_disp, width="stretch")
+    st.dataframe(df_canc_disp, use_container_width=True)
 
     col_e, col_f, _ = st.columns([1,1,2])
     with col_e:
